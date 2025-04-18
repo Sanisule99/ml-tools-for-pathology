@@ -4,4 +4,4 @@ I'm Saanie Sulley, MD, PhD — a physician-scientist, educator, and health infor
 
 As a FAMIA-certified informatician and Director of Data & Analytics, I’ve developed and implemented real-world analytics frameworks and research for national quality improvement.
 
-This repo reflects my mission to make machine learning tools in pathology more accessible to learners, researchers, and practitioners — and to empower data-driven care across settings.
+This repo reflects my mission to make machine learning tools in pathology more accessible to learners, researchers, and practitioners and to empower data-driven care across settings.
