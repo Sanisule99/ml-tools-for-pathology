@@ -52,7 +52,3 @@ These workflows illustrate how **bioinformatics and pathology intersect**:
 /requirements.txt
 ```
 
----
-
-## ✨ Residency Relevance
-This repo highlights how I integrate **molecular data, AI, and diagnostic pathology** to build practical, interpretable workflows that advance patient care.
