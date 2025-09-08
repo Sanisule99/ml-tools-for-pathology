@@ -1,0 +1,21 @@
+# 🧪 Biomarker Survival Analysis
+
+This tool compares survival outcomes (OS) between **high vs low biomarker expression** using TCGA data.
+
+### Features
+- 📈 Kaplan–Meier survival curves  
+- 📊 Log-rank tests  
+- ⚖️ Cox proportional hazards regression  
+- 🔄 Support for multiple biomarkers  
+
+### Versions
+- `biomarker_survival_analysis_python.ipynb` → Python (`lifelines`)  
+- `biomarker_survival_analysis_R.Rmd` → R (`survival` + `survminer`)  
+
+### Inputs
+1. `expression.csv` → genes × samples matrix (TPM/FPKM)  
+2. `clinical.csv` → clinical data with `sample_id`, `OS_time`, `OS_event`, and optional covariates  
+
+### Example
+```python
+BIOMARKER = "CD274"  # PD-L1
