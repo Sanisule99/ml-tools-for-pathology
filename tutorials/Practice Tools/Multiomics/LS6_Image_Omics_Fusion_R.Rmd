@@ -1,0 +1,302 @@
+---
+title: "Learning Series #6 — Image × Omics Fusion (R)"
+author: "Saanie Sulley"
+date: 2025-08-29
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+# Overview
+
+Two quick R paths to benchmark **Image × Omics** fusion with tile-level features and sample-level labels (e.g., **CD274_high**, **KRAS_mut**):
+
+- **(A) Baseline (no deep learning):** mean-pool tiles → one vector per case → **glm** classifier.
+- **(B) ABMIL with attention (torch for R):** tile-level attention pooling (Ilse 2018–style).
+
+Use the same CSVs from the Python demo: `example_tiles.csv`, `example_labels.csv`, `example_splits.csv`.
+
+---
+
+## Setup
+
+```r
+# CRAN
+# install.packages(c("readr","dplyr","tidyr","ggplot2","pROC","jsonlite"))
+
+# Torch for R (CPU is fine)
+# install.packages("torch")
+
+library(readr); library(dplyr); library(tidyr); library(ggplot2)
+library(pROC); library(jsonlite)
+has_torch <- requireNamespace("torch", quietly = TRUE)
+
+dir.create("outputs", showWarnings = FALSE)
+set.seed(1337)
+```
+
+## Load data
+
+```r
+tiles_path  <- "example_tiles.csv"
+labels_path <- "example_labels.csv"
+splits_path <- "example_splits.csv"
+
+tiles  <- read_csv(tiles_path,  show_col_types = FALSE)
+labels <- read_csv(labels_path, show_col_types = FALSE)
+splits <- read_csv(splits_path, show_col_types = FALSE)
+
+stopifnot(all(c("tile_id","sample_id") %in% names(tiles)))
+feat_cols <- grep("^f\d+$", names(tiles), value = TRUE)
+stopifnot(length(feat_cols) > 0)
+
+stopifnot(all(c("sample_id","CD274_high","KRAS_mut") %in% names(labels)))
+stopifnot(all(c("sample_id","split") %in% names(splits)))
+
+# Choose target
+LABEL_COL <- "CD274_high"  # or "KRAS_mut"
+
+df_lab <- labels %>% select(sample_id, !!LABEL_COL) %>% rename(y = !!LABEL_COL)
+df_split <- splits
+
+# Bags helper
+make_bag_list <- function(tiles_df, feat_cols) {
+  split(tiles_df[, c("sample_id", feat_cols)], tiles_df$sample_id)
+}
+
+bags <- make_bag_list(tiles, feat_cols)
+length(bags)
+```
+
+# (A) Lightweight Baseline — bag mean + glm
+
+```r
+# Aggregate tiles by mean to sample-level vectors
+agg <- tiles %>%
+  group_by(sample_id) %>%
+  summarise(across(all_of(feat_cols), mean, na.rm = TRUE), .groups = "drop") %>%
+  left_join(df_lab,   by = "sample_id") %>%
+  left_join(df_split, by = "sample_id") %>%
+  drop_na(y, split)
+
+x_cols <- feat_cols
+train <- agg %>% filter(split == "train")
+val   <- agg %>% filter(split == "val")
+test  <- agg %>% filter(split == "test")
+
+# Fit logistic regression
+f <- as.formula(paste("y ~", paste(x_cols, collapse = " + ")))
+m_glm <- glm(f, data = train, family = binomial())
+
+# Predict and evaluate
+pred_prob <- function(m, newdata) as.numeric(plogis(predict(m, newdata = newdata)))
+eval_bin <- function(y_true, y_score, name) {
+  if (length(unique(y_true)) < 2) return(list(auc = NA, acc = NA))
+  roc_obj <- pROC::roc(y_true, y_score, quiet = TRUE)
+  auc <- as.numeric(pROC::auc(roc_obj))
+  acc <- mean((y_score >= 0.5) == y_true)
+  # ROC plot
+  png(file.path("outputs", paste0("roc_glm_", name, ".png")), width = 720, height = 540, res = 120)
+  plot(roc_obj, main = paste("ROC — glm baseline —", name))
+  abline(0, 1, lty = 2)
+  dev.off()
+  svg(file.path("outputs", paste0("roc_glm_", name, ".svg"))); plot(roc_obj, main = paste("ROC — glm baseline —", name)); abline(0,1,lty=2); dev.off()
+  list(auc = auc, acc = acc)
+}
+
+mets_val  <- eval_bin(val$y,  pred_prob(m_glm, val),  "val")
+mets_test <- eval_bin(test$y, pred_prob(m_glm, test), "test")
+
+baseline_metrics <- list(
+  label = LABEL_COL,
+  method = "glm_mean_pool",
+  val = mets_val,
+  test = mets_test
+)
+write(jsonlite::toJSON(baseline_metrics, auto_unbox = TRUE, pretty = TRUE),
+      file = file.path("outputs", "metrics_glm_mean_pool.json"))
+baseline_metrics
+```
+
+# (B) ABMIL with torch for R (optional)
+
+```r
+if (!has_torch) {
+  cat("Package 'torch' not installed — skipping deep learning section. Install 'torch' to run ABMIL.\n")
+} else {
+  library(torch)
+
+  # Build bag lists per split
+  lab_map <- df_lab %>% tibble::deframe()
+  split_map <- df_split %>% tibble::deframe()
+
+  to_bag <- function(bags, split_name) {
+    ids <- names(bags)[names(bags) %in% names(split_map)[split_map == split_name]]
+    out <- vector("list", length(ids))
+    k <- 1L
+    for (sid in ids) {
+      x <- as.matrix(bags[[sid]][, feat_cols, drop = FALSE])
+      y <- as.numeric(lab_map[[sid]])
+      if (is.na(y)) next
+      out[[k]] <- list(sid = sid, x = torch_tensor(x, dtype = torch_float()), y = torch_tensor(y, dtype = torch_float()))
+      k <- k + 1L
+    }
+    out[!vapply(out, is.null, TRUE)]
+  }
+
+  bags_train <- to_bag(bags, "train")
+  bags_val   <- to_bag(bags, "val")
+  bags_test  <- to_bag(bags, "test")
+
+  MILBagDataset <- dataset(
+    name = "MILBagDataset",
+    initialize = function(items) self$items <- items,
+    .getitem = function(i) self$items[[i]],
+    .length = function() length(self$items)
+  )
+
+  ds_tr <- MILBagDataset(bags_train)
+  ds_va <- MILBagDataset(bags_val)
+  ds_te <- MILBagDataset(bags_test)
+
+  dl_tr <- dataloader(ds_tr, batch_size = 1, shuffle = TRUE)
+  dl_va <- dataloader(ds_va, batch_size = 1, shuffle = FALSE)
+  dl_te <- dataloader(ds_te, batch_size = 1, shuffle = FALSE)
+
+  ABMIL <- nn_module(
+    initialize = function(in_dim, hid_dim = 128) {
+      self$embed <- nn_sequential(
+        nn_linear(in_dim, hid_dim),
+        nn_tanh()
+      )
+      self$attn <- nn_sequential(
+        nn_linear(hid_dim, hid_dim),
+        nn_tanh(),
+        nn_linear(hid_dim, 1)
+      )
+      self$clf <- nn_linear(hid_dim, 1)
+    },
+    forward = function(x) {
+      # x: [n_tiles, in_dim]
+      H <- self$embed(x)              # [n_tiles, hid_dim]
+      a <- self$attn(H)$squeeze(2)    # [n_tiles]
+      w <- nnf_softmax(a, dim = 1)    # [n_tiles]
+      M <- torch_sum(H * w$unsqueeze(2), dim = 1)  # [hid_dim]
+      logit <- self$clf(M)$squeeze(1) # scalar
+      list(logit = logit, w = w, M = M)
+    }
+  )
+
+  in_dim <- length(feat_cols)
+  model <- ABMIL(in_dim = in_dim, hid_dim = 128)
+  opt <- optim_adam(model$parameters, lr = 1e-3, weight_decay = 1e-4)
+
+  run_epoch <- function(loader, train = TRUE) {
+    if (train) model$train() else model$eval()
+    y_true <- c(); y_score <- c(); losses <- c()
+    coro::loop(for (b in loader) {
+      x <- b[[1]]$x
+      y <- b[[1]]$y
+      if (train) opt$zero_grad()
+      out <- model(x)
+      loss <- nnf_binary_cross_entropy_with_logits(out$logit, y)
+      if (train) {
+        loss$backward()
+        opt$step()
+      }
+      prob <- as.numeric(torch_sigmoid(out$logit)$item())
+      y_true <- c(y_true, as.numeric(y$item()))
+      y_score <- c(y_score, prob)
+      losses <- c(losses, as.numeric(loss$item()))
+    })
+    list(loss = mean(losses), y_true = y_true, y_score = y_score)
+  }
+
+  eval_metrics <- function(y_true, y_score, name) {
+    if (length(unique(y_true)) < 2) return(list(auc = NA, acc = NA))
+    roc_obj <- pROC::roc(y_true, y_score, quiet = TRUE)
+    auc <- as.numeric(pROC::auc(roc_obj))
+    acc <- mean((y_score >= 0.5) == y_true)
+    png(file.path("outputs", paste0("roc_abmil_", name, ".png")), width = 720, height = 540, res = 120)
+    plot(roc_obj, main = paste("ROC — ABMIL —", name)); abline(0,1,lty=2)
+    dev.off()
+    svg(file.path("outputs", paste0("roc_abmil_", name, ".svg"))); plot(roc_obj, main = paste("ROC — ABMIL —", name)); abline(0,1,lty=2); dev.off()
+    list(auc = auc, acc = acc)
+  }
+
+  # Train
+  EPOCHS <- 8
+  hist <- data.frame(epoch = integer(), train_loss = numeric(), val_loss = numeric(), val_auc = numeric(), val_acc = numeric())
+  best_state <- NULL; best_val <- -Inf
+
+  for (e in 1:EPOCHS) {
+    tr <- run_epoch(dl_tr, train = TRUE)
+    va <- run_epoch(dl_va, train = FALSE)
+    mets_va <- eval_metrics(va$y_true, va$y_score, "val")
+    hist <- rbind(hist, data.frame(epoch = e, train_loss = tr$loss, val_loss = mean(abs(va$y_true - va$y_score)), val_auc = mets_va$auc, val_acc = mets_va$acc))
+    if (!is.na(mets_va$auc) && mets_va$auc > best_val) {
+      best_val <- mets_va$auc
+      best_state <- model$state_dict()
+    }
+    cat(sprintf("Epoch %02d | train_loss=%.4f  val_auc=%.3f  val_acc=%.3f\n", e, tr$loss, mets_va$auc, mets_va$acc))
+  }
+
+  if (!is.null(best_state)) model$load_state_dict(best_state)
+
+  # Final evaluation
+  va <- run_epoch(dl_va, train = FALSE)
+  te <- run_epoch(dl_te, train = FALSE)
+  mets_va <- eval_metrics(va$y_true, va$y_score, "val")
+  mets_te <- eval_metrics(te$y_true, te$y_score, "test")
+
+  abmil_metrics <- list(
+    label = LABEL_COL,
+    method = "abmil_torch",
+    val = mets_va,
+    test = mets_te
+  )
+  write(jsonlite::toJSON(abmil_metrics, auto_unbox = TRUE, pretty = TRUE),
+        file = file.path("outputs", "metrics_abmil_torch.json"))
+
+  # Loss curve (val proxy)
+  png(file.path("outputs", "loss_curve_abmil.png"), width = 720, height = 540, res = 120)
+  plot(hist$epoch, hist$train_loss, type = "l", xlab = "Epoch", ylab = "Loss", main = "Training Loss (ABMIL)"); grid()
+  dev.off()
+  svg(file.path("outputs", "loss_curve_abmil.svg")); plot(hist$epoch, hist$train_loss, type = "l", xlab = "Epoch", ylab = "Loss", main = "Training Loss (ABMIL)"); grid(); dev.off()
+
+  # Export attention for top-2 test samples by predicted prob
+  export_attention <- function(sample_ids, top_k = 2) {
+    out_paths <- c()
+    for (sid in head(sample_ids, top_k)) {
+      df_s <- tiles %>% filter(sample_id == sid)
+      x <- torch_tensor(as.matrix(df_s[, feat_cols, drop = FALSE]), dtype = torch_float())
+      model$eval()
+      out <- model(x)
+      attn <- as.numeric(as_array(out$w))
+      out_df <- df_s %>% select(tile_id, sample_id, x, y) %>% mutate(attention = attn) %>% arrange(desc(attention))
+      pth <- file.path("outputs", paste0("attention_", sid, ".csv"))
+      write.csv(out_df, pth, row.names = FALSE)
+      out_paths <- c(out_paths, pth)
+    }
+    out_paths
+  }
+
+  # choose top-2 by ABMIL predicted prob on test
+  pr_te <- te$y_score
+  sids_te <- vapply(bags_test, function(z) z$sid, "")
+  ord <- order(pr_te, decreasing = TRUE)
+  export_attention(sids_te[ord], top_k = 2)
+}
+```
+
+## Results
+
+- Baseline metrics saved to `outputs/metrics_glm_mean_pool.json` and ROC curves `roc_glm_{val|test}.png/svg`  
+- If torch installed: ABMIL metrics saved to `outputs/metrics_abmil_torch.json` and curves `roc_abmil_{val|test}.png/svg`  
+- Attention CSVs: `outputs/attention_<sample>.csv` (if ABMIL ran)
+
+**Tip:** If your real features are `.npy` or parquet, convert to a CSV with columns `sample_id`,`tile_id`,`f0..fD-1` (and optional `x`,`y`).
+
+*End.*
