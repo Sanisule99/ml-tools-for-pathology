@@ -38,5 +38,3 @@ This repository provides a visual atlas of diagnostic immunohistochemistry (IHC)
 
 ---
 
-## ✨ Residency Relevance
-This project shows my ability to **bridge RNA expression data with practical pathology markers**, a skill essential for modern molecular pathology practice.
