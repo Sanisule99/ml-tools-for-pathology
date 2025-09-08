@@ -1,0 +1,116 @@
+---
+title: "Learning Series #3 — Survival & Prognostic Biomarker Tools (TCGA)"
+author: "Saanie Sulley"
+date: "2025-08-29"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+# Overview
+
+This R Markdown mirrors the Python notebook for Kaplan–Meier (KM) and Cox PH survival analysis.
+It uses **survival** and **survminer**.
+
+> Pathology angle: quantify the prognostic relevance of markers (e.g., **CD274/PD-L1**, **GATA3**, **NKX2-1/TTF1**).
+
+## Setup
+
+```r
+# Install if needed
+# install.packages(c("survival","survminer","readr","dplyr","ggplot2"))
+
+library(readr)
+library(dplyr)
+library(survival)
+library(survminer)
+library(ggplot2)
+```
+
+## Load data
+
+```r
+clinical_path <- "example_clinical.csv"     # change to your file
+expr_path     <- "example_expression.csv"   # change to your file
+
+clinical <- read_csv(clinical_path, show_col_types = FALSE)
+expr     <- read_csv(expr_path, show_col_types = FALSE)
+
+stopifnot("sample_id" %in% colnames(clinical))
+stopifnot(all(c("OS_time","OS_event") %in% colnames(clinical)))
+stopifnot("sample_id" %in% colnames(expr))
+
+df <- inner_join(clinical, expr, by = "sample_id")
+cat("Merged shape:", nrow(df), "x", ncol(df), "\n")
+head(df)
+```
+
+## Choose biomarker & groups
+
+```r
+biomarker <- "CD274"  # e.g., "NKX2-1", "GATA3"
+stopifnot(biomarker %in% colnames(df))
+
+cutoff <- median(df[[biomarker]], na.rm = TRUE)
+df$group <- ifelse(df[[biomarker]] >= cutoff, "High", "Low")
+table(df$group)
+```
+
+## Kaplan–Meier + log-rank
+
+```r
+surv_obj <- Surv(time = df$OS_time, event = df$OS_event)
+fit <- survfit(surv_obj ~ group, data = df)
+
+# KM plot (use defaults; do not set explicit colors per instructions)
+p <- ggsurvplot(
+  fit, data = df,
+  risk.table = TRUE, pval = TRUE,
+  ggtheme = theme_minimal()
+)
+p
+
+# Save figures
+ggsave("km_plot.png", plot = p$plot, dpi = 300, width = 6, height = 4)
+ggsave("km_risktable.png", plot = p$table, dpi = 300, width = 6, height = 2.5)
+```
+
+## Cox PH (uni- and multivariable)
+
+```r
+# Univariable (continuous biomarker)
+cox_uni <- coxph(surv_obj ~ df[[biomarker]])
+summary(cox_uni)
+
+# Multivariable (add if available)
+covars <- c("age","grade","stage")
+has_cov <- intersect(covars, colnames(df))
+if (length(has_cov) > 0) { 
+  form <- as.formula(paste("surv_obj ~", paste(c(biomarker, has_cov), collapse = " + ")))
+  cox_multi <- coxph(form, data = df)
+  print(summary(cox_multi))
+}
+```
+
+## Forest-style table
+
+```r
+# A compact table of HRs
+hr <- data.frame(
+  term = biomarker,
+  HR = exp(coef(cox_uni)),
+  lower = exp(confint(cox_uni))[1],
+  upper = exp(confint(cox_uni))[2],
+  p = summary(cox_uni)$coefficients[,"Pr(>|z|)"]
+)
+hr
+write.csv(hr, "cox_hr_table.csv", row.names = FALSE)
+```
+
+## Notes
+- Ensure `OS_time` units are consistent (days vs months).
+- Consider PH assumption checks (e.g., `cox.zph(cox_uni)`).
+
+*End.*
