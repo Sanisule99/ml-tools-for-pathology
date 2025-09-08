@@ -1,0 +1,261 @@
+---
+title: "Learning Series #5 — Multi-Omics Mini-Pipeline (R)"
+author: "Saanie Sulley"
+date: 2025-08-29
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+# Overview
+
+This R Markdown mirrors the Python pipeline for **multi-omics** analysis joining **expression**, **mutations (MAF-like)**, and **clinical** data to produce:
+
+- Kaplan–Meier survival curves (KM) and Cox models with molecular + clinical covariates
+- Mutation burden, driver mutation flags (TP53, KRAS, EGFR, …)
+- Expression signatures (e.g., immune activation via CD8A + GZMB; PD-L1 via CD274; proliferation via MKI67)
+- Bar plot of top mutated genes and an oncoplot-style heatmap
+- Optional Bioconductor helpers via **maftools**
+
+> **Pathology angle:** Translational pipeline tying molecular profiles (PD-L1, TP53, etc.) to outcomes and risk stratification.
+
+---
+
+## Setup
+
+```r
+# Install CRAN dependencies if needed
+# install.packages(c("survival","survminer","readr","dplyr","tidyr","ggplot2","tibble","stringr","broom"))
+
+# (Optional) Bioconductor for MAF helpers
+# if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+# BiocManager::install("maftools")
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(tibble)
+library(stringr)
+library(broom)
+
+# Optional
+has_maftools <- requireNamespace("maftools", quietly = TRUE)
+
+dir.create("outputs", showWarnings = FALSE)
+```
+
+## Load inputs
+
+> Uses the toy CSVs from this series so the report runs immediately. Replace with your TCGA/cBioPortal data in the same shapes.
+
+```r
+clinical_path <- "example_clinical.csv"
+expr_path     <- "example_expression.csv"
+maf_path      <- "example_maf.csv"
+
+clinical <- read_csv(clinical_path, show_col_types = FALSE)
+expr     <- read_csv(expr_path, show_col_types = FALSE)
+maf      <- read_csv(maf_path,  show_col_types = FALSE)
+
+stopifnot(all(c("sample_id","OS_time","OS_event") %in% names(clinical)))
+stopifnot("sample_id" %in% names(expr))
+stopifnot(all(c("Tumor_Sample_Barcode","Hugo_Symbol") %in% names(maf)))
+
+maf <- maf %>% rename(sample_id = Tumor_Sample_Barcode)
+
+common_ids <- Reduce(intersect, list(clinical$sample_id, expr$sample_id, maf$sample_id))
+clinical <- clinical %>% filter(sample_id %in% common_ids)
+expr     <- expr     %>% filter(sample_id %in% common_ids)
+maf      <- maf      %>% filter(sample_id %in% common_ids)
+
+cat("N samples:", length(common_ids), "\n")
+```
+
+## Feature engineering
+
+- **Mutation burden** per sample
+- **Driver flags** for selected genes
+- **Expression signatures** (z-scored genes, immune signature = mean of CD8A/GZMB z)
+
+```r
+# Mutation burden
+mut_burden <- maf %>%
+  distinct(sample_id, Hugo_Symbol) %>%
+  count(sample_id, name = "mut_burden")
+
+drivers <- c("TP53","KRAS","EGFR","PIK3CA","BRAF","PTEN")
+
+driver_flags <- maf %>%
+  mutate(flag = 1L) %>%
+  select(sample_id, Hugo_Symbol, flag) %>%
+  distinct() %>%
+  filter(Hugo_Symbol %in% drivers) %>%
+  tidyr::pivot_wider(names_from = Hugo_Symbol, values_from = flag, values_fill = 0) %>%
+  rename_with(~ paste0(.x, "_mut"), all_of(drivers)) %>%
+  mutate(across(everything(), ~ replace_na(.x, 0L)))
+
+# z-score selected expression, build immune signature
+expr_z <- expr %>%
+  mutate(across(-sample_id, ~ as.numeric(scale(.x)), .names = "{.col}_z"))
+
+if (all(c("CD8A_z","GZMB_z") %in% names(expr_z))) {{
+  expr_z <- expr_z %>% mutate(immune_sig = (CD8A_z + GZMB_z)/2)
+}} else {{
+  expr_z <- expr_z %>% mutate(immune_sig = NA_real_)
+}}
+
+expr_keep <- c("sample_id","CD274","MKI67","immune_sig")
+expr_feats <- expr_z %>% select(any_of(expr_keep))
+
+df <- clinical %>%
+  left_join(mut_burden, by = "sample_id") %>%
+  left_join(driver_flags, by = "sample_id") %>%
+  left_join(expr_feats,   by = "sample_id") %>%
+  mutate(across(where(is.numeric), ~ replace_na(.x, 0)))
+
+# Combined groups: median splits for CD274 and mutation burden
+cd274_cut   <- median(df$CD274, na.rm = TRUE)
+burden_cut  <- median(df$mut_burden, na.rm = TRUE)
+df <- df %>%
+  mutate(PDL1_grp   = if_else(CD274 >= cd274_cut, "HighPDL1","LowPDL1"),
+         Burden_grp = if_else(mut_burden >= burden_cut, "HighBurden","LowBurden"),
+         combo_group = paste(PDL1_grp, Burden_grp, sep = "_"))
+
+write.csv(df, file = "outputs/feature_table.csv", row.names = FALSE)
+head(df)
+```
+
+## Mutation frequency + oncoplot-style heatmap
+
+```r
+top_tbl <- maf %>%
+  count(Hugo_Symbol, name = "mut_count") %>%
+  arrange(desc(mut_count)) %>%
+  mutate(freq = mut_count / n_distinct(maf$sample_id))
+
+write.csv(top_tbl, "outputs/top_mutated_genes.csv", row.names = FALSE)
+
+# Bar plot (top 20)
+top20 <- top_tbl %>% slice_head(n = 20)
+p_bar <- ggplot(top20, aes(x = reorder(Hugo_Symbol, -freq), y = freq)) +
+  geom_col() +
+  labs(x = "Gene", y = "Mutation frequency", title = "Top mutated genes") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("outputs/bar_top_genes.png", p_bar, width = 6, height = 4, dpi = 300)
+ggsave("outputs/bar_top_genes.svg", p_bar, width = 6, height = 4)
+
+# Heatmap-like (samples × genes) using ggplot
+top_genes <- top20$Hugo_Symbol
+mat <- maf %>%
+  filter(Hugo_Symbol %in% top_genes) %>%
+  distinct(sample_id, Hugo_Symbol) %>%
+  mutate(mut = 1L) %>%
+  tidyr::complete(sample_id = df$sample_id, Hugo_Symbol = top_genes, fill = list(mut = 0L)) %>%
+  left_join(df %>% select(sample_id, mut_burden), by = "sample_id") %>%
+  arrange(desc(mut_burden))
+
+p_heat <- ggplot(mat, aes(x = Hugo_Symbol, y = factor(sample_id, levels = unique(sample_id)), fill = mut)) +
+  geom_tile() +
+  scale_fill_gradient(limits = c(0,1)) +
+  labs(x = "Genes", y = "Samples", title = "Oncoplot-like heatmap (1 = mutated)") +
+  theme_minimal() +
+  theme(axis.text.y = element_blank())
+ggsave("outputs/oncoplot_like_heatmap.png", p_heat, width = 7, height = 6, dpi = 300)
+ggsave("outputs/oncoplot_like_heatmap.svg", p_heat, width = 7, height = 6)
+
+# Optional: maftools on real MAFs
+if (has_maftools) {{
+  # library(maftools)
+  # m <- read.maf(maf = "path/to/real_tcga.maf")
+  # png("outputs/maftools_oncoplot.png", width = 1200, height = 800, res = 150)
+  # oncoplot(m = m, top = 20)
+  # dev.off()
+}}
+```
+
+## KM survival for combined groups
+
+```r
+surv_obj <- Surv(time = df$OS_time, event = df$OS_event)
+fit_combo <- survfit(surv_obj ~ combo_group, data = df)
+
+p_km <- ggsurvplot(
+  fit_combo, data = df,
+  risk.table = TRUE, pval = TRUE,
+  ggtheme = theme_minimal()
+)
+p_km
+ggsave("outputs/km_combo_group.png", plot = p_km$plot, width = 6, height = 4, dpi = 300)
+ggsave("outputs/km_combo_group.svg", plot = p_km$plot, width = 6, height = 4)
+```
+
+## Cox PH (multi-omics + clinical covariates)
+
+```r
+covars <- intersect(c("age","grade","stage"), names(df))
+model_vars <- c("mut_burden","CD274","MKI67","TP53_mut","KRAS_mut","EGFR_mut", covars)
+
+form <- as.formula(paste("surv_obj ~", paste(model_vars, collapse = " + ")))
+cox_multi <- coxph(form, data = df)
+summary(cox_multi)
+
+# PH assumption check
+ph_test <- cox.zph(cox_multi)
+print(ph_test)
+
+# Save summary
+coef_tbl <- broom::tidy(cox_multi, exponentiate = TRUE, conf.int = TRUE)
+write.csv(coef_tbl, "outputs/cox_summary_multiomics.csv", row.names = FALSE)
+
+# Simple forest-like plot (HR with CI)
+coef_plot <- coef_tbl %>%
+  arrange(estimate) %>%
+  mutate(term = factor(term, levels = term))
+
+p_forest <- ggplot(coef_plot, aes(x = estimate, y = term)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  geom_vline(xintercept = 1, linetype = 2) +
+  labs(x = "Hazard Ratio (HR)", y = NULL, title = "Multivariable Cox — Multi-Omics") +
+  theme_minimal()
+ggsave("outputs/forest_cox_multiomics.png", p_forest, width = 6, height = 5, dpi = 300)
+ggsave("outputs/forest_cox_multiomics.svg", p_forest, width = 6, height = 5)
+```
+
+## Scatter — mutation burden vs CD274
+
+```r
+p_scatter <- ggplot(df, aes(x = mut_burden, y = CD274)) +
+  geom_point() +
+  labs(x = "Mutation burden (# genes mutated)", y = "CD274 expression", title = "Mutation burden vs CD274") +
+  theme_minimal()
+ggsave("outputs/scatter_burden_vs_cd274.png", p_scatter, width = 6, height = 4, dpi = 300)
+ggsave("outputs/scatter_burden_vs_cd274.svg", p_scatter, width = 6, height = 4)
+```
+
+## TCGA/cBioPortal reshaping notes
+
+**Expression**
+- Ensure matrix is samples × genes; add a `sample_id` column matching clinical IDs.
+- If you have genes × samples, transpose and convert to long/wide as needed.
+
+**MAF**
+- With **maftools**: `m <- read.maf(maf = "path/to/file.maf")`.
+  - Export a minimal long view via: `dplyr::select(m@data, Tumor_Sample_Barcode, Hugo_Symbol, Variant_Classification)`
+  - Optionally filter to non-synonymous variants for burden metrics.
+
+**Clinical**
+- Ensure `OS_time`/`OS_event` units and censoring are correct.
+- Harmonize barcodes (e.g., TCGA-XX-XXXX-01C ⇒ patient/sample level you choose).
+
+## Session info
+
+```r
+sessionInfo()
+```
