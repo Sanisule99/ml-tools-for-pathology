@@ -41,8 +41,3 @@ This project explores **where and why AI misclassifies pathology images**, and u
   ├── lymphocyte_vs_plasma.png
   └── ...
 ```
-
----
-
-## ✨ Residency Relevance
-This repo demonstrates how I **translate AI errors into pathology teaching material**, reflecting both my computational expertise and my diagnostic training.
