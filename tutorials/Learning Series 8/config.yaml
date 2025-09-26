@@ -1,0 +1,5 @@
+SEED: 42
+N_SITES: 4
+N_CLASSES: 3
+N: 600
+OUTPUT_DIR: "outputs"
