@@ -1,4 +1,4 @@
-# Learning Series #10 — Survival Analysis Meets Pathology AI
+# Learning Series #10 — Survival Analysis Meets Biomedical Informatics
 
 **Goal:** Show how image-derived features (or any embeddings) can be linked to outcomes using Kaplan–Meier curves and Cox proportional hazards.
 
