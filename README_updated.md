@@ -24,7 +24,7 @@ This repository offers open-source, easy-to-follow tutorials and tools for apply
 ## 💡 Why This Matters
 
 Modern pathology increasingly relies on informatics and data science. These tools aim to:
-- **Democratize ML in pathology**
+- **Democratize ML in clinical and research approaches**
 - Help you **reuse public data** or **analyze your own**
 - Run on **modest hardware** (no GPU/cloud required)
 - Support **education, QI projects, and translational research**
@@ -34,10 +34,14 @@ Modern pathology increasingly relies on informatics and data science. These tool
 ## 👨‍⚕️ About Me
 
 **Saanie Sulley, MD, PhD**  
-A pathology enthusiast with a strong background in health informatics, clinical research, and data analytics.  
-I’m continuously exploring learning opportunities and ways to integrate computational tools into the diagnostic and research landscape of pathology.
+I'm Saanie Sulley, MD, PhD a physician-scientist, educator, and health informatics professional. My work blends biomedical informatics, clinical data science, and health equity, with a strong focus on maternal health and translational informatics.I am also novice learner and researcher of pathology informatics
 
-📬 Questions or collaborations? Open an [issue](https://github.com/YOUR_USERNAME/ml-tools-for-pathology/issues) or reach out.
+As a FAMIA & AHIC-certified informatician, I’ve developed and implemented real-world analytics frameworks and research for national quality improvement.
+
+This repo reflects my mission to make machine learning tools in pathology more accessible to learners, researchers, and practitioners and to empower data-driven care across settings. 
+I’m continuously exploring learning opportunities and ways to integrate computational tools into the diagnostic and research landscape.
+
+📬 Questions or collaborations? Open an [issue](https://github.com/sanisule99/ml-tools-for-pathology/issues) or reach out.
 
 ---
 
@@ -47,4 +51,4 @@ I’m continuously exploring learning opportunities and ways to integrate comput
 - Report issues or suggest new tutorials.
 - Fork this repo and submit a pull request.
 
-Together we can make ML in pathology more usable, impactful, and inclusive.
+Together we can make ML, bioinformatics, clinical informatics, data engineering and integration more usable, impactful, and inclusive.
